@@ -1,0 +1,69 @@
+[crate]
+name = "agent-operations"
+version = "0.1.0"
+layer = "meta"
+description = "SuperInstance documentation hub, integration discovery tools, and operational patterns"
+
+[provides]
+capabilities = [
+  { name = "capability_specification", type = "document", description = "SPEC_CAPABILITY_TOML.md — the specification for self-describing crate capabilities" },
+  { name = "integration_discovery", type = "tool", description = "discover_integrations.py — scans for CAPABILITY.toml files, builds dependency graphs, finds integration opportunities" },
+  { name = "a2a_protocol", type = "module", description = "Agent-to-agent communication protocol definitions" },
+  { name = "patterns", type = "module", description = "Operational patterns and best practices for the SuperInstance ecosystem" },
+  { name = "templates", type = "module", description = "Repository templates including CAPABILITY.toml skeleton" },
+  { name = "roadmap", type = "document", description = "AGI convergence roadmap and post-code agent vision" }
+]
+exports = [
+  "SPEC_CAPABILITY_TOML.md",
+  "tools/discover_integrations.py",
+  "a2a-protocol/*",
+  "patterns/*",
+  "templates/*",
+  "AGI_CONVERGENCE_ROADMAP.md",
+  "POST_CODE_AGENT_VISION.md",
+  "PROMPTSCRIPT_INTEGRATION_DEEP_DIVE.md"
+]
+
+[requires]
+optional = []
+
+[integrates.everything]
+crate = "*"
+module = "tools"
+description = "Meta-repo: provides tools and documentation for discovering and integrating ALL SuperInstance crates"
+human_steps = [
+  "1. Clone agent-operations for tooling and docs",
+  "2. Run python3 tools/discover_integrations.py /path/to/repos to map ecosystem",
+  "3. Read SPEC_CAPABILITY_TOML.md to understand CAPABILITY.toml format",
+  "4. Use templates/ when creating new crates"
+]
+agent_steps = [
+  "Read SPEC_CAPABILITY_TOML.md to understand self-describing capability format",
+  "Run discover_integrations.py to build ecosystem dependency graph",
+  "Read integration reports to understand cross-crate relationships",
+  "Use CAPABILITY.toml files from each crate as integration contracts"
+]
+
+[onboarding.human]
+quick_start = "git clone https://github.com/SuperInstance/agent-operations && cd agent-operations"
+example = """
+# Discover integrations across the ecosystem
+python3 tools/discover_integrations.py ~/repos/superinstance
+
+# Read the capability specification
+cat SPEC_CAPABILITY_TOML.md
+
+# Explore patterns
+ls patterns/
+"""
+
+[onboarding.agent]
+context_needed = ["ecosystem_repos_path", "integration_scope"]
+api_surface = [
+  "tools/discover_integrations.py <path> — scan and report",
+  "SPEC_CAPABILITY_TOML.md — specification document",
+  "a2a-protocol/ — agent communication protocols",
+  "patterns/ — operational patterns",
+  "templates/ — repo templates with CAPABILITY.toml"
+]
+integration_pattern = "This is the meta-repo. Read SPEC to understand format, use discovery tool to map ecosystem, consult patterns for best practices, apply templates when creating new crates. Every other crate's CAPABILITY.toml feeds into this tooling."
