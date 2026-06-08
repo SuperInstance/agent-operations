@@ -1,0 +1,99 @@
+name: Node/TypeScript CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      node_version:
+        type: string
+        default: "22"
+      enable_security:
+        type: boolean
+        default: true
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: ${{ jobs.test.outputs.coverage_pct }}
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      test_count:  ${{ steps.results.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+      coverage_pct: ${{ steps.results.outputs.coverage }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        run: pnpm exec tsc --noEmit || npx tsc --noEmit
+
+      - name: Run tests
+        id: results
+        run: |
+          pnpm test -- --reporter=json --outputFile=test-results.json 2>&1 | tee test-output.txt || true
+          # Try to parse Jest JSON output; fall back to line counting
+          if [ -f test-results.json ]; then
+            count=$(node -e "const r=require('./test-results.json'); console.log(r.numTotalTests||0)" 2>/dev/null || echo "0")
+            passed=$(node -e "const r=require('./test-results.json'); console.log(r.numPassedTests||0)" 2>/dev/null || echo "0")
+            failed=$(node -e "const r=require('./test-results.json'); console.log(r.numFailedTests||0)" 2>/dev/null || echo "0")
+            coverage=$(node -e "const r=require('./test-results.json'); const c=r.coverageMap; console.log(0)" 2>/dev/null || echo "0")
+          else
+            count=$(grep -c '^✓\|^✗\|^PASS\|^FAIL' test-output.txt || echo "0")
+            passed=$(grep -c '^✓\|^PASS' test-output.txt || echo "0")
+            failed=$(grep -c '^✗\|^FAIL' test-output.txt || echo "0")
+            coverage="0"
+          fi
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+          echo "coverage=${coverage}" >> "$GITHUB_OUTPUT"
+          # Propagate actual test failures
+          grep -q 'failed\|FAIL' test-output.txt && [ "$failed" -gt 0 ] && exit 1 || true
+
+      - name: Lint
+        run: pnpm exec eslint . --ext .ts,.tsx,.js,.jsx || npx eslint . --ext .ts,.tsx || true
+
+      - name: npm audit
+        if: inputs.enable_security
+        run: pnpm audit --audit-level=high || npm audit --audit-level=high || true
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    TypeScript
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: ${{ needs.test.outputs.coverage_pct }}
+      status:      ${{ needs.test.result }}
+    secrets: inherit

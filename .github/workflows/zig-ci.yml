@@ -1,0 +1,81 @@
+name: Zig CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      zig_version:
+        type: string
+        default: "0.13.0"
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: "0"
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      test_count:  ${{ steps.results.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ inputs.zig_version }}
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            zig-cache
+          key: zig-${{ inputs.zig_version }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: zig-${{ inputs.zig_version }}-
+
+      - name: Build
+        run: zig build
+
+      - name: Format check
+        run: zig fmt --check src/
+
+      - name: Run tests
+        id: results
+        run: |
+          zig build test --summary all 2>&1 | tee test-output.txt
+          # Parse "N/M tests passed" from summary output
+          passed=$(grep -oP '\d+(?=/\d+ tests passed)' test-output.txt | tail -1 || echo "0")
+          total=$(grep -oP '(?<=\d/)\d+(?= tests passed)' test-output.txt | tail -1 || echo "0")
+          failed=$((total - passed))
+          echo "count=${total}" >> "$GITHUB_OUTPUT"
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    Zig
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: "0"
+      status:      ${{ needs.test.result }}
+    secrets: inherit

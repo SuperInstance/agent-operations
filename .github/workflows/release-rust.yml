@@ -1,0 +1,106 @@
+name: Release Rust Crate
+
+on:
+  workflow_call:
+    inputs:
+      crate_name:
+        type: string
+        required: true
+      layer:
+        type: number
+        default: 0
+        # 0 = no SI deps (publish immediately)
+        # 1+ = depends on lower layers (caller must use needs: to sequence)
+      dry_run:
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io  # requires environment protection rules
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify version matches tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+          echo "Version: $cargo_version"
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check licenses advisories
+
+      - name: Dry run publish
+        if: inputs.dry_run
+        run: cargo publish --dry-run
+
+      - name: Publish to crates.io
+        if: "!inputs.dry_run"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --no-verify
+          echo "Published ${{ inputs.crate_name }} to crates.io"
+
+      - name: Rate-limit pause (layer > 0)
+        if: "!inputs.dry_run && inputs.layer > 0"
+        run: |
+          echo "Layer ${{ inputs.layer }} crate — waiting 10 minutes for crates.io rate limit"
+          sleep 600
+
+      - name: Emit fleet event
+        if: "!inputs.dry_run"
+        env:
+          SUPERINSTANCE_REGISTRY_URL: ${{ secrets.SUPERINSTANCE_REGISTRY_URL }}
+        run: |
+          if [ -z "$SUPERINSTANCE_REGISTRY_URL" ]; then exit 0; fi
+          python3 - <<'PYEOF'
+          import os, json, urllib.request
+
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          registry_url = os.environ["SUPERINSTANCE_REGISTRY_URL"]
+
+          body = json.dumps({
+              "event_type": "crate_published",
+              "agent_id":   f"release:{repo}",
+              "vessel_id":  "github-actions",
+              "payload": {
+                  "crate":   "${{ inputs.crate_name }}",
+                  "version": tag.lstrip("v"),
+                  "layer":   ${{ inputs.layer }},
+                  "repo":    repo,
+              },
+              "severity": "info",
+          }).encode()
+
+          url = registry_url.rstrip("/") + "/rest/v1/fleet_events"
+          req = urllib.request.Request(url, data=body, method="POST",
+              headers={
+                  "Content-Type": "application/json",
+                  "Prefer": "return=minimal",
+                  "apikey": os.environ.get("SUPERINSTANCE_ANON_KEY", ""),
+                  "Authorization": f"Bearer {os.environ.get('SUPERINSTANCE_SERVICE_KEY', os.environ.get('SUPERINSTANCE_ANON_KEY', ''))}",
+              })
+          try:
+              urllib.request.urlopen(req, timeout=10)
+              print("fleet event emitted")
+          except Exception as e:
+              print(f"non-fatal: {e}")
+          PYEOF

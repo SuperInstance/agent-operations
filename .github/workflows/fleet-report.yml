@@ -1,0 +1,147 @@
+name: Fleet Report
+
+on:
+  workflow_call:
+    inputs:
+      repo_name:
+        type: string
+        required: true
+      run_id:
+        type: string
+        required: true
+      language:
+        type: string
+        required: true
+      test_count:
+        type: string
+        default: "0"
+      test_passed:
+        type: string
+        default: "0"
+      test_failed:
+        type: string
+        default: "0"
+      coverage_pct:
+        type: string
+        default: "0"
+      status:
+        type: string
+        required: true   # success | failure | cancelled | skipped
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    continue-on-error: true  # never block a merge on reporting failure
+
+    steps:
+      - name: Push to Supabase fleet_events
+        env:
+          SUPERINSTANCE_REGISTRY_URL: ${{ secrets.SUPERINSTANCE_REGISTRY_URL }}
+        run: |
+          if [ -z "$SUPERINSTANCE_REGISTRY_URL" ]; then
+            echo "SUPERINSTANCE_REGISTRY_URL not configured — skipping fleet report"
+            exit 0
+          fi
+
+          python3 - <<'PYEOF'
+          import os, json, urllib.request, urllib.parse
+
+          registry_url = os.environ["SUPERINSTANCE_REGISTRY_URL"]
+          repo         = "${{ inputs.repo_name }}"
+          run_id       = "${{ inputs.run_id }}"
+          language     = "${{ inputs.language }}"
+          test_count   = int("${{ inputs.test_count }}"  or "0")
+          test_passed  = int("${{ inputs.test_passed }}" or "0")
+          test_failed  = int("${{ inputs.test_failed }}" or "0")
+          coverage_pct = float("${{ inputs.coverage_pct }}" or "0")
+          status       = "${{ inputs.status }}"
+          branch       = "${{ github.ref_name }}"
+          trigger      = "${{ github.event_name }}"
+
+          severity = "error" if test_failed > 0 or status == "failure" else "info"
+
+          payload = {
+              "repo":         repo,
+              "branch":       branch,
+              "run_id":       run_id,
+              "trigger":      trigger,
+              "language":     language,
+              "test_count":   test_count,
+              "test_passed":  test_passed,
+              "test_failed":  test_failed,
+              "coverage_pct": coverage_pct,
+              "duration_s":   0,  # wall time not easily available cross-job
+              "status":       status,
+          }
+
+          # Supabase REST API — insert into fleet_events
+          # URL format: https://<project>.supabase.co/rest/v1/fleet_events
+          supabase_rest = registry_url.rstrip("/") + "/rest/v1/fleet_events"
+
+          body = json.dumps({
+              "event_type": "ci_run",
+              "agent_id":   f"ci:{repo}",
+              "vessel_id":  "github-actions",
+              "payload":    payload,
+              "severity":   severity,
+          }).encode()
+
+          req = urllib.request.Request(
+              supabase_rest,
+              data=body,
+              method="POST",
+              headers={
+                  "Content-Type":  "application/json",
+                  "Prefer":        "return=minimal",
+                  "apikey":        os.environ.get("SUPERINSTANCE_ANON_KEY", ""),
+                  "Authorization": f"Bearer {os.environ.get('SUPERINSTANCE_SERVICE_KEY', os.environ.get('SUPERINSTANCE_ANON_KEY', ''))}",
+              }
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  print(f"fleet_events insert: HTTP {resp.status}")
+          except Exception as e:
+              print(f"fleet_events insert failed (non-fatal): {e}")
+
+          # Also update repos.last_test_count etc. via PATCH
+          repo_short = repo.split("/", 1)[1] if "/" in repo else repo
+          patch_url = registry_url.rstrip("/") + f"/rest/v1/repos?name=eq.{urllib.parse.quote(repo_short)}"
+
+          patch_body = json.dumps({
+              "last_ci_run_at":   None,  # let Supabase set now()
+              "last_test_count":  test_count,
+              "last_test_passed": test_passed,
+              "last_coverage":    coverage_pct if coverage_pct > 0 else None,
+              "health_status":    "green" if status == "success" else "red",
+          }).encode()
+
+          patch_req = urllib.request.Request(
+              patch_url,
+              data=patch_body,
+              method="PATCH",
+              headers={
+                  "Content-Type":  "application/json",
+                  "Prefer":        "return=minimal",
+                  "apikey":        os.environ.get("SUPERINSTANCE_ANON_KEY", ""),
+                  "Authorization": f"Bearer {os.environ.get('SUPERINSTANCE_SERVICE_KEY', os.environ.get('SUPERINSTANCE_ANON_KEY', ''))}",
+              }
+          )
+
+          try:
+              with urllib.request.urlopen(patch_req, timeout=10) as resp:
+                  print(f"repos PATCH: HTTP {resp.status} — {repo_short} test_count={test_count}")
+          except Exception as e:
+              print(f"repos PATCH failed (non-fatal): {e}")
+          PYEOF
+
+      - name: Summary
+        run: |
+          echo "## CI Fleet Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repo | ${{ inputs.repo_name }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Language | ${{ inputs.language }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tests | ${{ inputs.test_passed }} / ${{ inputs.test_count }} passed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Coverage | ${{ inputs.coverage_pct }}% |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Status | ${{ inputs.status }} |" >> "$GITHUB_STEP_SUMMARY"
