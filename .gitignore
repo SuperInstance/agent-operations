@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build artifacts
+target/
+dist/
+build/
+*.o
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
