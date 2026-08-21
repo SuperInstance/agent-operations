@@ -1,0 +1,99 @@
+name: WASM CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      rust_toolchain:
+        type: string
+        default: stable
+      wasm_size_limit_kb:
+        type: number
+        default: 500
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: "0"
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      test_count:  ${{ steps.results.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install wasm-opt
+        run: |
+          cargo install wasm-opt --quiet 2>/dev/null || \
+            sudo apt-get install -y binaryen
+
+      - name: Build (web target)
+        run: wasm-pack build --target web --release
+
+      - name: Build (bundler target)
+        run: wasm-pack build --target bundler --release --out-dir pkg-bundler
+
+      - name: Size check
+        run: |
+          wasm_file=$(find pkg -name '*.wasm' | head -1)
+          if [ -f "$wasm_file" ]; then
+            size_kb=$(du -k "$wasm_file" | cut -f1)
+            echo "WASM size: ${size_kb}KB (limit: ${{ inputs.wasm_size_limit_kb }}KB)"
+            if [ "$size_kb" -gt "${{ inputs.wasm_size_limit_kb }}" ]; then
+              echo "ERROR: WASM bundle exceeds size limit"
+              exit 1
+            fi
+          fi
+
+      - name: Test in Chrome (headless)
+        id: results
+        run: |
+          wasm-pack test --headless --chrome 2>&1 | tee test-output.txt
+          passed=$(grep -c 'test .* ... ok' test-output.txt || echo "0")
+          failed=$(grep -c 'test .* ... FAILED' test-output.txt || echo "0")
+          count=$((passed + failed))
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+      - name: Test in Node
+        run: wasm-pack test --node || true
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    WASM
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: "0"
+      status:      ${{ needs.test.result }}
+    secrets: inherit

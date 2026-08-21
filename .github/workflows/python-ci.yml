@@ -1,0 +1,120 @@
+name: Python CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      python_version:
+        type: string
+        default: "3.12"
+      min_coverage:
+        type: number
+        default: 70
+      enable_security:
+        type: boolean
+        default: true
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: ${{ jobs.test.outputs.coverage_pct }}
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      test_count:  ${{ steps.collect.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+      coverage_pct: ${{ steps.coverage.outputs.pct }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install ${{ inputs.python_version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Collect tests
+        id: collect
+        run: |
+          count=$(uv run pytest --collect-only -q 2>&1 | grep 'tests collected' | awk '{print $1}' || echo "0")
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests with coverage
+        id: results
+        run: |
+          uv run pytest -q --tb=short \
+            --json-report --json-report-file=report.json \
+            --cov --cov-report=xml --cov-report=term-missing \
+            2>&1 | tee test-output.txt
+          passed=$(python -c "import json; d=json.load(open('report.json')); print(d['summary'].get('passed',0))" 2>/dev/null || echo "0")
+          failed=$(python -c "import json; d=json.load(open('report.json')); print(d['summary'].get('failed',0))" 2>/dev/null || echo "0")
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+      - name: Coverage threshold
+        id: coverage
+        run: |
+          pct=$(python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          print(round(float(root.attrib.get('line-rate','0'))*100,1))
+          " 2>/dev/null || echo "0")
+          echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+          python -c "
+          pct = ${{ inputs.min_coverage }}
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          actual = float(root.attrib.get('line-rate','0'))*100
+          if actual < pct:
+              print(f'Coverage {actual:.1f}% below minimum {pct}%')
+              exit(1)
+          print(f'Coverage {actual:.1f}% meets minimum {pct}%')
+          "
+
+      - name: Mypy
+        run: uv run mypy . --ignore-missing-imports || true
+
+      - name: Bandit security scan
+        if: inputs.enable_security
+        run: uv run bandit -r . -ll --exclude .venv,tests
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    Python
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: ${{ needs.test.outputs.coverage_pct }}
+      status:      ${{ needs.test.result }}
+    secrets: inherit

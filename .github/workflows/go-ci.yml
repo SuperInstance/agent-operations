@@ -1,0 +1,93 @@
+name: Go CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      go_version:
+        type: string
+        default: stable
+      enable_security:
+        type: boolean
+        default: true
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: ${{ jobs.test.outputs.coverage_pct }}
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      test_count:  ${{ steps.count.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+      coverage_pct: ${{ steps.coverage.outputs.pct }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Count tests
+        id: count
+        run: |
+          count=$(go test -list '.*' ./... 2>/dev/null | grep -c '^Test' || echo "0")
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests with race detector
+        id: results
+        run: |
+          go test -race -count=1 -v ./... 2>&1 | tee test-output.txt
+          passed=$(grep -c '^--- PASS:' test-output.txt || true)
+          failed=$(grep -c '^--- FAIL:' test-output.txt || true)
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+      - name: Coverage
+        id: coverage
+        run: |
+          go test -coverprofile=coverage.out ./...
+          pct=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | tr -d '%' || echo "0")
+          echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+
+      - name: golangci-lint
+        if: inputs.enable_security
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    Go
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: ${{ needs.test.outputs.coverage_pct }}
+      status:      ${{ needs.test.result }}
+    secrets: inherit

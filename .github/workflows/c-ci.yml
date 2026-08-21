@@ -1,0 +1,93 @@
+name: C CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      enable_security:
+        type: boolean
+        default: true
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: "0"
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+    outputs:
+      test_count:  ${{ steps.results.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ${{ matrix.compiler }} valgrind cppcheck clang-format
+
+      - name: Build
+        run: make CC=${{ matrix.compiler }} build
+
+      - name: Run tests
+        id: results
+        run: |
+          make CC=${{ matrix.compiler }} test 2>&1 | tee test-output.txt
+          passed=$(grep -c '^PASS\b\|PASS:' test-output.txt || echo "0")
+          failed=$(grep -c '^FAIL\b\|FAIL:\|ERROR:' test-output.txt || echo "0")
+          count=$((passed + failed))
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+      - name: AddressSanitizer (clang only)
+        if: matrix.compiler == 'clang'
+        run: |
+          make CC=clang CFLAGS="-fsanitize=address -g -O1" build
+          make CC=clang test
+
+      - name: Valgrind (gcc only)
+        if: matrix.compiler == 'gcc' && inputs.enable_security
+        run: |
+          # Run test binary under valgrind if it exists as a single binary
+          if [ -f ./test_runner ]; then
+            valgrind --error-exitcode=1 --leak-check=full ./test_runner
+          fi
+
+      - name: cppcheck
+        if: inputs.enable_security
+        run: cppcheck --error-exitcode=1 --enable=error --suppress=missingIncludeSystem src/
+
+      - name: clang-format check
+        run: |
+          find src -name '*.c' -o -name '*.h' | xargs clang-format --dry-run --Werror
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    C
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: "0"
+      status:      ${{ needs.test.result }}
+    secrets: inherit

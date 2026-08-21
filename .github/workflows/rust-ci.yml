@@ -1,0 +1,132 @@
+name: Rust CI
+
+on:
+  workflow_call:
+    inputs:
+      report_to_fleet:
+        type: boolean
+        default: true
+      rust_toolchain:
+        type: string
+        default: stable
+      enable_wasm:
+        type: boolean
+        default: false
+      enable_security:
+        type: boolean
+        default: true
+      runner:
+        type: string
+        default: ubuntu-latest
+    outputs:
+      test_count:
+        value: ${{ jobs.test.outputs.test_count }}
+      test_passed:
+        value: ${{ jobs.test.outputs.test_passed }}
+      test_failed:
+        value: ${{ jobs.test.outputs.test_failed }}
+      coverage_pct:
+        value: ${{ jobs.test.outputs.coverage_pct }}
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      test_count:  ${{ steps.count.outputs.count }}
+      test_passed: ${{ steps.results.outputs.passed }}
+      test_failed: ${{ steps.results.outputs.failed }}
+      coverage_pct: ${{ steps.coverage.outputs.pct }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          components: clippy, rustfmt
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      - name: Count tests
+        id: count
+        run: |
+          count=$(cargo test --all-features -- --list 2>&1 | grep ': test$' | wc -l | tr -d ' ')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        id: results
+        run: |
+          cargo test --all-features 2>&1 | tee test-output.txt
+          passed=$(grep -c '^test.*ok$' test-output.txt || true)
+          failed=$(grep -c '^test.*FAILED$' test-output.txt || true)
+          echo "passed=${passed}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
+
+      - name: Check no-default-features
+        run: cargo build --no-default-features
+
+      - name: Coverage
+        id: coverage
+        if: inputs.enable_security
+        run: |
+          cargo install cargo-llvm-cov --quiet 2>/dev/null || true
+          if cargo llvm-cov --version &>/dev/null; then
+            cargo llvm-cov --all-features --lcov --output-path lcov.info
+            pct=$(cargo llvm-cov --all-features --summary-only 2>&1 | grep 'TOTAL' | awk '{print $NF}' | tr -d '%' || echo "0")
+            echo "pct=${pct}" >> "$GITHUB_OUTPUT"
+          else
+            echo "pct=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: cargo deny
+        if: inputs.enable_security
+        uses: EmbarkStudios/cargo-deny-action@v1
+        with:
+          command: check licenses advisories
+
+      - name: WASM build
+        if: inputs.enable_wasm
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --target wasm32-unknown-unknown --no-default-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(grep '^rust-version' Cargo.toml | sed 's/.*= *"\(.*\)"/\1/' || echo "")
+          echo "version=${msrv}" >> "$GITHUB_OUTPUT"
+      - name: Install MSRV toolchain
+        if: steps.msrv.outputs.version != ''
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: MSRV check
+        if: steps.msrv.outputs.version != ''
+        run: cargo check --all-features
+
+  fleet-report:
+    needs: test
+    if: always() && inputs.report_to_fleet
+    uses: SuperInstance/agent-operations/.github/workflows/fleet-report.yml@master
+    with:
+      repo_name:   ${{ github.repository }}
+      run_id:      ${{ github.run_id }}
+      language:    Rust
+      test_count:  ${{ needs.test.outputs.test_count }}
+      test_passed: ${{ needs.test.outputs.test_passed }}
+      test_failed: ${{ needs.test.outputs.test_failed }}
+      coverage_pct: ${{ needs.test.outputs.coverage_pct }}
+      status:      ${{ needs.test.result }}
+    secrets: inherit
